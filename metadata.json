@@ -1,0 +1,7 @@
+{
+  "name": "ZERO HOUR — DEBUGGER GAUNTLET",
+  "description": "Live Python debugging competition platform with synchronized countdown timer, progressive challenge unlocking, instant test grading, real-time leaderboard, and organizer control.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

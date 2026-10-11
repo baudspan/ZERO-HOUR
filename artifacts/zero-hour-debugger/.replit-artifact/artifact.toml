@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "ZERO HOUR — DEBUGGER GAUNTLET"
+description = "A live debugging competition for student hackathons, with participant challenge play, server-scored progress, a leaderboard, and a protected organizer console."
+version = "1.0.0"
+id = "artifacts/zero-hour-debugger"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18587
+
+[services.development]
+run = "pnpm --filter @workspace/zero-hour-debugger run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/zero-hour-debugger", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/zero-hour-debugger/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18587"
+BASE_PATH = "/"

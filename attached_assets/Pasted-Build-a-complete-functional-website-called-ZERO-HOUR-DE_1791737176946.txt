@@ -1,0 +1,31 @@
+Build a complete, functional website called **ZERO HOUR — DEBUGGER GAUNTLET** for a student hackathon with approximately 50 simultaneous participants.
+
+**Design:** Create a sleek HackerRank-inspired interface with a dark hacker aesthetic, black and charcoal backgrounds, neon green and cyan accents, monospace fonts, and subtle animations. Prioritize functionality and reliability over decoration.
+
+**Participant interface:** Participants enter their registered Team ID and access code. Display a 15-minute countdown, question description, Python code editor with syntax highlighting, Run Code button, terminal showing actual output and errors, Submit Solution button, progress indicator, and leaderboard.
+
+**Five debugging challenges:** Create five original, fully working Python debugging questions with moderate-to-difficult difficulty that increases progressively. Cover logic errors, loops, conditions, edge cases, and algorithms. Each question must contain buggy starter code, instructions, sample input/output, hidden tests, and a correct reference solution. Make the challenges interesting and solvable within 15 minutes total. Do not use placeholder questions.
+
+**Automatic progression:** Question 1 starts unlocked. Participants edit the code and click Run Code to see the real output. Running code alone must not unlock the next question. When they click Submit Solution, the backend runs the code against hidden tests. Only a solution passing all tests earns marks and unlocks the next question. Incorrect submissions display useful errors and allow retries. Questions must unlock sequentially, and participants must not be able to skip stages by changing URLs or browser data.
+
+**Final celebration:** When Question 5 passes all tests, record the completion timestamp immediately and display a celebratory success screen with subtle confetti, the final score, and completion time. Reveal this tongue twister:
+
+"The sixth sick sheik's sixth sheep's sick."
+
+Include a fun “SAY IT THREE TIMES FAST!” button. The tongue twister must not affect scores or completion times.
+
+**Timer:** The challenge starts at an official organizer-controlled start time and lasts exactly 15 minutes. Use a server-controlled deadline that cannot be reset by refreshing, changing the device clock, reconnecting, or opening another tab. When time expires, reject further scoring submissions, preserve marks for solved questions, and automatically give zero to unanswered questions.
+
+**Scoring:** Each of the five questions is worth 20 marks, for 100 total. A correct answer within the first 60 seconds after a question unlocks earns 20 marks. Deduct one mark for every additional 15 seconds, with a minimum of zero. Incorrect attempts earn no marks. Calculate all scores and timestamps on the server, and prevent duplicate scoring.
+
+**Leaderboard:** Display rank, Team ID, team name, score, questions solved, completion status, and completion time. Update automatically from real database records. Rank by score, then number of questions solved, then earliest successful completion time.
+
+**Organizer dashboard:** Add protected organizer authentication. Allow organizers to upload a CSV containing registered Team IDs, team names, and participant names, and issue unique access codes. Display each participant's five individual scores, total score, attempts, timestamps, completion status, and time-expired status. Include search, sorting, filters, and CSV export. Keep hidden tests, solutions, and administrator functions private.
+
+**Technology:** Use a maintainable React and TypeScript frontend, a Python FastAPI backend, a persistent PostgreSQL database, and a secure sandboxed Python execution service such as Judge0 or an equivalent. Never execute untrusted participant code directly inside the main backend server. Protect secrets using environment variables. Implement validation, authorization, rate limits, execution timeouts, resource limits, and error logging.
+
+**Reliability:** Design for approximately 50 simultaneous participants. Persist progress on the server. Handle duplicate requests and simultaneous submissions safely. Do not award points when the execution service fails. Provide an organizer recovery procedure for infrastructure failures.
+
+**Deliverables:** Build a complete application, not a static mockup. Include all five tested questions, the working editor and runner, automatic unlocking, server-controlled timer, scoring, leaderboard, organizer dashboard, database setup, deployment instructions, and environment-variable documentation.
+
+Before declaring it complete, test correct and incorrect answers, all five unlock transitions, timer expiry, page refresh, duplicate submissions, access restrictions, CSV export, and simulated concurrent usage by 50 participants. Clearly identify any feature that still requires configuration or external services. Never claim that an untested feature works.

@@ -1,0 +1,26 @@
+{
+  "name": "workspace",
+  "version": "0.0.0",
+  "license": "MIT",
+  "scripts": {
+    "dev": "npm run dev --workspace=@workspace/zero-hour-debugger",
+    "build": "npm run build --workspace=@workspace/zero-hour-debugger",
+    "start": "npm run start --workspace=@workspace/zero-hour-debugger",
+    "typecheck:libs": "tsc --build",
+    "typecheck": "tsc --build",
+    "lint": "tsc --build"
+  },
+  "workspaces": [
+    "artifacts/*",
+    "lib/*",
+    "scripts"
+  ],
+  "private": true,
+  "dependencies": {
+    "@replit/connectors-sdk": "^0.4.3"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.6",
+    "typescript": "~5.9.3"
+  }
+}
