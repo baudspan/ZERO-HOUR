@@ -182,28 +182,31 @@ function CompetitionRoom({ dashboard }: { dashboard: ParticipantDashboard }) {
     return () => clearTimeout(timer);
   }, [code, localKey, questionId]);
 
+  const [proctorViolated, setProctorViolated] = useState(false);
+  const isDisqualified = proctorViolated || (dashboard as any).disqualified || dashboard.status === 'disqualified';
   const now = useClock(dashboard.serverNow);
   const remaining = countdown(dashboard.deadline, now);
-  const isDisqualified = (dashboard as any).disqualified || dashboard.status === 'disqualified';
-  const expired = remaining === '00:00' || dashboard.status === 'ended' || isDisqualified;
-  const eventRunning = dashboard.status === 'running' && !isDisqualified;
+  const expired = remaining === '00:00' || dashboard.status === 'ended' || dashboard.status === 'expired' || isDisqualified;
+  const eventRunning = !expired && !isDisqualified;
 
-  // Anti-Cheat: Screen / Tab Switch Detector
-  // If the participant switches tabs, minimizes window, or leaves the screen, time is immediately UP!
+  // Anti-Cheat: Strict Proctor Monitor
+  // If the participant switches tabs, minimizes window, or leaves the screen, questions disappear and time is immediately UP!
   useEffect(() => {
-    if (isDisqualified || dashboard.status !== 'running') return;
-
+    if (isDisqualified || expired) return;
     let triggered = false;
+
     const handleDisqualification = async (reason: string) => {
       if (triggered) return;
       triggered = true;
+      // 1. Immediately synchronously trigger client state to hide questions without 1ms of delay
+      setProctorViolated(true);
       try {
         await fetch('/api/participant/disqualify', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(dashboard.teamId ? { 'x-team-id': dashboard.teamId } : {}),
-            ...(sessionStorage.getItem('zh-session-token') ? { 'Authorization': `Bearer ${sessionStorage.getItem('zh-session-token')}` } : {}),
+            ...(sessionStorage.getItem('zh-session-token') ? { 'Authorization': 'Bearer ' + sessionStorage.getItem('zh-session-token') } : {}),
           },
           body: JSON.stringify({ reason }),
         });
@@ -221,7 +224,6 @@ function CompetitionRoom({ dashboard }: { dashboard: ParticipantDashboard }) {
     };
 
     const handleWindowBlur = () => {
-      // Triggered when focus leaves the window/screen
       handleDisqualification('Switched away from browser window / screen left');
     };
 
@@ -232,7 +234,8 @@ function CompetitionRoom({ dashboard }: { dashboard: ParticipantDashboard }) {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
     };
-  }, [isDisqualified, dashboard.status, dashboard.teamId, client]);
+  }, [isDisqualified, expired, dashboard.teamId, client]);
+
   if (isDisqualified) {
     return <main className="mx-auto max-w-3xl px-5 py-16">
       <section className="panel border-[#7f2d2d] bg-[#1a0f0f] p-8 text-center reveal shadow-2xl">

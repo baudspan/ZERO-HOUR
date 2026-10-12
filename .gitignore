@@ -51,3 +51,9 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+-e 
+.env
+.env.local
+.dev.pid
+.dev.env.json
+

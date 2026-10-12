@@ -251,6 +251,8 @@ interface Team {
   teamName: string;
   participantNames: string[];
   accessCode: string;
+  startedAt?: string | null;
+  deadline?: string | null;
   disqualified?: boolean;
   disqualifiedAt?: string | null;
   disqualifiedReason?: string | null;
@@ -668,24 +670,40 @@ function deepEqual(a: any, b: any): boolean {
 // Build Participant Dashboard object
 function buildParticipantDashboard(teamId: string) {
   const normId = teamId.toUpperCase();
-  const team = teamsMap.get(normId);
-  const teamName = team ? team.teamName : normId;
+  let team = teamsMap.get(normId);
+  if (!team) {
+    team = {
+      teamId: normId,
+      teamName: normId,
+      participantNames: [normId],
+      accessCode: UNIVERSAL_ACCESS_CODE,
+      startedAt: new Date().toISOString(),
+      deadline: new Date(Date.now() + EVENT_DURATION_SECONDS * 1000).toISOString(),
+    };
+    teamsMap.set(normId, team);
+  }
+  const teamName = team.teamName;
   const progress = progressMap.get(normId) || initTeamProgress(normId);
   const now = new Date();
-
   const active = progress.find((p) => p.status === "unlocked");
   const solvedCount = progress.filter((p) => p.status === "solved").length;
   const totalScore = progress.reduce((sum, p) => sum + p.score, 0);
 
-  const startAt = eventStartAt;
-  const deadline = new Date(startAt.getTime() + EVENT_DURATION_SECONDS * 1000);
-  const evStatus = getEventStatus(startAt, now);
-  const status = team?.disqualified ? "disqualified" : (solvedCount === 5 ? "complete" : evStatus);
+  // If team does not have startedAt/deadline set yet, give them a fresh 15-minute countdown!
+  if (!team.startedAt) {
+    team.startedAt = now.toISOString();
+    team.deadline = new Date(now.getTime() + EVENT_DURATION_SECONDS * 1000).toISOString();
+  }
+  const teamStartAt = new Date(team.startedAt);
+  const teamDeadline = team.deadline ? new Date(team.deadline) : new Date(teamStartAt.getTime() + EVENT_DURATION_SECONDS * 1000);
+
+  const isExpired = now.getTime() >= teamDeadline.getTime();
+  const evStatus = isExpired ? "ended" : getEventStatus(teamStartAt, now);
+  const status = team.disqualified ? "disqualified" : (solvedCount === 5 ? "complete" : evStatus);
 
   let activeQuestion: any = null;
   let draft: string | null = null;
-
-  const isExpiredOrDisqualified = Boolean(team?.disqualified) || status === "ended" || status === "expired";
+  const isExpiredOrDisqualified = Boolean(team.disqualified) || isExpired || status === "ended" || status === "expired";
   if (active && !isExpiredOrDisqualified) {
     const ch = CHALLENGES.find((c) => c.id === active.questionId);
     if (ch) {
@@ -702,12 +720,12 @@ function buildParticipantDashboard(teamId: string) {
     teamId: normId,
     teamName,
     serverNow: now.toISOString(),
-    startAt: startAt.toISOString(),
-    deadline: deadline.toISOString(),
+    startAt: teamStartAt.toISOString(),
+    deadline: teamDeadline.toISOString(),
     status,
-    disqualified: Boolean(team?.disqualified),
-    disqualifiedReason: team?.disqualifiedReason || null,
-    activeQuestionId: active ? active.questionId : null,
+    disqualified: Boolean(team.disqualified),
+    disqualifiedReason: team.disqualifiedReason || null,
+    activeQuestionId: isExpiredOrDisqualified ? null : (active ? active.questionId : null),
     question: activeQuestion,
     draft,
     progress: progress.map((p) => ({
@@ -1116,8 +1134,9 @@ async function createApp() {
       const { code, input } = req.body || {};
 
       const team = teamsMap.get(teamId);
-      if (team?.disqualified) {
-        res.status(403).json({ error: "Time is up. Disqualified due to screen or tab departure." });
+      const isTimeUp = team?.deadline ? new Date().getTime() >= new Date(team.deadline).getTime() : false;
+      if (team?.disqualified || isTimeUp) {
+        res.status(403).json({ error: "Time is up. Challenge window is closed and code execution is locked." });
         return;
       }
       const prog = progressMap.get(teamId);
@@ -1462,6 +1481,29 @@ async function createApp() {
     res.send(rows.join("\n"));
   });
 
+    api.post("/organizer/reset-now", async (_req: Request, res: Response) => {
+    const now = new Date();
+    eventStartAt = now;
+    const deadlineIso = new Date(now.getTime() + EVENT_DURATION_SECONDS * 1000).toISOString();
+    for (const [, team] of teamsMap) {
+      team.startedAt = now.toISOString();
+      team.deadline = deadlineIso;
+      team.disqualified = false;
+      team.disqualifiedAt = null;
+      team.disqualifiedReason = null;
+    }
+    for (const [tId] of teamsMap) {
+      initTeamProgress(tId);
+    }
+    await persistLeaderboardSnapshot();
+    console.log("[ZERO HOUR] 15-Minute round restarted for all teams at", now.toISOString());
+    res.json({
+      success: true,
+      startAt: now.toISOString(),
+      deadline: deadlineIso,
+      message: "15-minute round successfully started now for all teams."
+    });
+  });
   api.put("/organizer/event", requireOrganizer, (req: Request, res: Response) => {
     const { startAt } = req.body || {};
     if (!startAt) {
