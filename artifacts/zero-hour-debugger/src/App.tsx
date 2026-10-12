@@ -59,7 +59,8 @@ function Skeleton({ rows = 3 }: { rows?: number }) {
 function StatusTag({ status }: { status: string }) {
   const live = status === 'running' || status === 'in_progress';
   const done = status === 'complete' || status === 'solved';
-  return <span className={`mono inline-flex items-center gap-2 rounded border px-2.5 py-1 text-[10px] uppercase tracking-[.08em] ${live ? 'border-[#2d7448] text-[#69e895]' : done ? 'border-[#276c70] text-[#68e2e6]' : 'border-[#3b4641] text-[#9eaaa4]'}`}>
+  const disqualified = status === 'disqualified';
+  return <span className={`mono inline-flex items-center gap-2 rounded border px-2.5 py-1 text-[10px] uppercase tracking-[.08em] ${disqualified ? 'border-[#7f2d2d] bg-[#291414] text-[#f87171]' : live ? 'border-[#2d7448] text-[#69e895]' : done ? 'border-[#276c70] text-[#68e2e6]' : 'border-[#3b4641] text-[#9eaaa4]'}`}>
     {live && <i className="live-dot pulse"/>}{status.replaceAll('_', ' ')}
   </span>;
 }
@@ -68,7 +69,7 @@ function ParticipantLogin({ competition, error }: { competition?: Competition; e
   const createSession = useCreateParticipantSession();
   const client = useQueryClient();
   const [teamId, setTeamId] = useState('');
-  const [accessCode, setAccessCode] = useState('zero-hour-2026');
+  const [accessCode, setAccessCode] = useState('');
   const submit = (e: FormEvent) => {
     e.preventDefault();
     const cleanTeam = teamId.trim() || 'TEAM-042';
@@ -115,27 +116,18 @@ function ParticipantLogin({ competition, error }: { competition?: Competition; e
             <label className="block">
               <span className="mono mb-2 flex items-center justify-between text-[10px] tracking-[.1em] text-[#a8b6ae]">
                 <span>TEAM ID / NAME</span>
-                <span className="text-[#68e492]">Any Team ID accepted</span>
+                <span className="text-[#68e492]">Assigned Team ID required</span>
               </span>
-              <input className="field mono" autoComplete="username" value={teamId} onChange={e=>setTeamId(e.target.value)} placeholder="e.g. TEAM-042 or your team name" maxLength={80} required data-testid="input-team-id"/>
+              <input className="field mono" autoComplete="username" value={teamId} onChange={e=>setTeamId(e.target.value)} placeholder="e.g. TEAM-01 or your team ID" maxLength={80} required data-testid="input-team-id"/>
             </label>
             <label className="block">
               <span className="mono mb-2 flex items-center justify-between text-[10px] tracking-[.1em] text-[#a8b6ae]">
                 <span>ACCESS CODE</span>
                 <span className="text-[#64df8f]">Same code for all teams</span>
               </span>
-              <input className="field mono" type="text" autoComplete="current-password" value={accessCode} onChange={e=>setAccessCode(e.target.value)} placeholder="zero-hour-2026" maxLength={128} required data-testid="input-access-code"/>
+              <input className="field mono" type="password" autoComplete="current-password" value={accessCode} onChange={e=>setAccessCode(e.target.value)} placeholder="Enter access code (e.g. zero-hour-2026)" maxLength={128} required data-testid="input-access-code"/>
             </label>
-            <div className="flex flex-wrap items-center justify-between gap-2 mono text-[10px] text-[#73847a]">
-              <span>Quick demo teams:</span>
-              <div className="flex gap-2">
-                <button type="button" className="text-[#5ce388] hover:underline" onClick={()=>{setTeamId('TEAM-042');setAccessCode('zero-hour-2026');}}>TEAM-042</button>
-                <span>·</span>
-                <button type="button" className="text-[#5ce388] hover:underline" onClick={()=>{setTeamId('TEAM-001');setAccessCode('zero-hour-2026');}}>TEAM-001</button>
-                <span>·</span>
-                <button type="button" className="text-[#5ce388] hover:underline" onClick={()=>{setTeamId('TEAM-DEBUG');setAccessCode('zero-hour-2026');}}>TEAM-DEBUG</button>
-              </div>
-            </div>
+            
             {createSession.isError && <p role="alert" className="text-sm text-[#f09c95]">{(createSession.error as Error)?.message || 'Could not open your team session. Check your credentials and try again.'}</p>}
             {error && <p role="alert" className="text-sm text-[#f09c95]">{error}</p>}
             <button type="submit" disabled={createSession.isPending || !teamId.trim()} className="btn btn-primary w-full" data-testid="button-enter-room">{createSession.isPending ? 'VERIFYING TEAM…' : <>ENTER CHALLENGE ROOM <ArrowRight size={15}/></>}</button>
@@ -192,8 +184,96 @@ function CompetitionRoom({ dashboard }: { dashboard: ParticipantDashboard }) {
 
   const now = useClock(dashboard.serverNow);
   const remaining = countdown(dashboard.deadline, now);
-  const expired = remaining === '00:00' || dashboard.status === 'ended';
-  const eventRunning = dashboard.status === 'running';
+  const isDisqualified = (dashboard as any).disqualified || dashboard.status === 'disqualified';
+  const expired = remaining === '00:00' || dashboard.status === 'ended' || isDisqualified;
+  const eventRunning = dashboard.status === 'running' && !isDisqualified;
+
+  // Anti-Cheat: Screen / Tab Switch Detector
+  // If the participant switches tabs, minimizes window, or leaves the screen, time is immediately UP!
+  useEffect(() => {
+    if (isDisqualified || dashboard.status !== 'running') return;
+
+    let triggered = false;
+    const handleDisqualification = async (reason: string) => {
+      if (triggered) return;
+      triggered = true;
+      try {
+        await fetch('/api/participant/disqualify', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(dashboard.teamId ? { 'x-team-id': dashboard.teamId } : {}),
+            ...(sessionStorage.getItem('zh-session-token') ? { 'Authorization': `Bearer ${sessionStorage.getItem('zh-session-token')}` } : {}),
+          },
+          body: JSON.stringify({ reason }),
+        });
+      } catch (err) {
+        console.error('Failed to report disqualification', err);
+      }
+      void client.invalidateQueries({ queryKey: getGetParticipantDashboardQueryKey() });
+      void client.invalidateQueries({ queryKey: getGetLeaderboardQueryKey() });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden || document.visibilityState === 'hidden') {
+        handleDisqualification('Tab switched or minimized');
+      }
+    };
+
+    const handleWindowBlur = () => {
+      // Triggered when focus leaves the window/screen
+      handleDisqualification('Switched away from browser window / screen left');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleWindowBlur);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, [isDisqualified, dashboard.status, dashboard.teamId, client]);
+  if (isDisqualified) {
+    return <main className="mx-auto max-w-3xl px-5 py-16">
+      <section className="panel border-[#7f2d2d] bg-[#1a0f0f] p-8 text-center reveal shadow-2xl">
+        <div className="eyebrow text-[#ef4444]">DISQUALIFIED · TIME IS UP</div>
+        <h1 className="mt-3 text-3xl font-bold text-[#fca5a5]">Strict Proctor: Screen Departure Detected</h1>
+        <p className="mt-4 text-sm text-[#e2a8a8] leading-relaxed">
+          Tab switching, application switching, window minimization, or screen departure was detected by the proctoring monitor.
+          Per competition rules, your round was ended immediately. Questions and code editors are locked.
+        </p>
+        <div className="mt-6 inline-block rounded border border-[#7f2d2d] bg-[#2d1414] px-8 py-5">
+          <div className="mono text-xs text-[#f87171]">FINAL SCORE LOCKED</div>
+          <div className="mono mt-1 text-3xl font-bold text-[#fca5a5]">{dashboard.totalScore} / 15</div>
+          <div className="mono mt-1 text-xs text-[#e2a8a8]">{dashboard.solvedCount} / 5 Challenges Cleared</div>
+        </div>
+        <div className="mt-8 flex justify-center gap-4">
+          <a href="/leaderboard" className="btn btn-primary">VIEW LIVE LEADERBOARD</a>
+        </div>
+      </section>
+    </main>;
+  }
+
+  if (expired) {
+    return <main className="mx-auto max-w-3xl px-5 py-16">
+      <section className="panel border-[#5c3e2e] bg-[#1a1410] p-8 text-center reveal shadow-2xl">
+        <div className="eyebrow text-[#e69352]">ROUND OVER · TIME IS UP</div>
+        <h1 className="mt-3 text-3xl font-bold text-[#fed7aa]">The 15-Minute Deadline Has Expired</h1>
+        <p className="mt-4 text-sm text-[#e6c0a0] leading-relaxed">
+          The official challenge window has closed. All challenge questions, test suites, and editors are locked from viewing.
+        </p>
+        <div className="mt-6 inline-block rounded border border-[#6b472e] bg-[#2d1e14] px-8 py-5">
+          <div className="mono text-xs text-[#f97316]">YOUR FINAL SCORE</div>
+          <div className="mono mt-1 text-3xl font-bold text-[#fed7aa]">{dashboard.totalScore} / 15</div>
+          <div className="mono mt-1 text-xs text-[#e6c0a0]">{dashboard.solvedCount} / 5 Challenges Cleared</div>
+        </div>
+        <div className="mt-8 flex justify-center gap-4">
+          <a href="/leaderboard" className="btn btn-primary">VIEW FINAL LEADERBOARD</a>
+        </div>
+      </section>
+    </main>;
+  }
+
   if (!question) return <main className="mx-auto max-w-5xl px-5 py-14">
     {dashboard.status === 'complete' ? <FinalFinish dashboard={dashboard}/> :
       <section className="panel mx-auto max-w-2xl p-8 text-center"><div className="eyebrow">ROOM STATUS</div><h1 className="mt-3 text-3xl font-semibold">{dashboard.status === 'scheduled' ? 'Stand by, team.' : 'Session complete.'}</h1><p className="mt-3 text-sm text-[#98a79f]">{dashboard.status === 'scheduled' ? 'Your challenge will unlock when the official start time arrives.' : 'There are no unlocked challenges right now.'}</p></section>}
@@ -212,7 +292,11 @@ function CompetitionRoom({ dashboard }: { dashboard: ParticipantDashboard }) {
       <div className="flex items-center gap-5"><div className="mono text-[10px] tracking-[.1em] text-[#84928a]">SERVER DEADLINE</div><div className={`mono flex items-center gap-2 text-xl ${expired ? 'text-[#ef8c82]' : 'text-[#65eb94]'}`} aria-live="polite"><Clock3 size={16}/>{remaining}</div></div>
     </div>
     <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
-      {[['TEAM',dashboard.teamId],['SOLVED',`${dashboard.solvedCount} / ${dashboard.progress.length || 5}`],['SERVER SCORE',String(dashboard.totalScore)],['ATTEMPTS',String(activeProgress?.attempts ?? 0)]].map(([label,value])=><div key={label} className="panel flex items-center justify-between px-4 py-3"><span className="mono text-[9px] tracking-[.11em] text-[#7d8b83]">{label}</span><strong className="mono text-sm font-medium text-[#d7e5dc]">{value}</strong></div>)}
+      {[['TEAM',dashboard.teamId],['SOLVED',`${dashboard.solvedCount} / ${dashboard.progress.length || 5}`],['MARKS',`${dashboard.totalScore} / 15`],['ATTEMPTS',String(activeProgress?.attempts ?? 0)]].map(([label,value])=><div key={label} className="panel flex items-center justify-between px-4 py-3"><span className="mono text-[9px] tracking-[.11em] text-[#7d8b83]">{label}</span><strong className="mono text-sm font-medium text-[#d7e5dc]">{value}</strong></div>)}
+    </div>
+    <div className="mb-5 flex items-center gap-3 rounded border border-[#6b382d] bg-[#221310] px-4 py-2.5 mono text-[11px] text-[#fca5a5]">
+      <span className="live-dot pulse !bg-[#ef4444]"/>
+      <span><strong>STRICT PROCTOR ACTIVE:</strong> Do not switch tabs, minimize, or leave this screen. Leaving the window will immediately end your challenge and freeze your timer.</span>
     </div>
     <div className="grid gap-4 xl:grid-cols-[minmax(330px,.82fr)_minmax(460px,1.18fr)]">
       <section className="space-y-4">
@@ -234,7 +318,7 @@ function CompetitionRoom({ dashboard }: { dashboard: ParticipantDashboard }) {
         <CodeMirror aria-label="Python code editor" className="code-editor" value={code} height="340px" extensions={[python()]} theme={oneDark} editable={!expired} indentWithTab onChange={setCode} data-testid="input-code-editor"/>
         <div className="border-t border-[#293530] p-4">
           <label className="mono mb-2 block text-[9px] tracking-[.12em] text-[#89968e]" htmlFor="stdin">CUSTOM INPUT <span className="text-[#65736a]">(OPTIONAL)</span></label>
-          <textarea id="stdin" className="field mono min-h-[66px] resize-y text-[11px]" value={customInput} onChange={e=>setCustomInput(e.target.value)} placeholder="Enter stdin for a quick run…" disabled={expired} data-testid="input-custom-stdin"/>
+          <textarea id="stdin" className="field mono min-h-[66px] resize-y text-[11px]" value={customInput} onChange={e=>setCustomInput(e.target.value)} placeholder="Optional: Enter custom JSON input (or leave blank to test with sample input)…" disabled={expired} data-testid="input-custom-stdin"/>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3"><p className="mono text-[9px] text-[#77847c]">RUN checks your input only. SUBMIT checks official tests.</p>
             <div className="flex gap-2">
               <button
@@ -278,7 +362,7 @@ function CompetitionRoom({ dashboard }: { dashboard: ParticipantDashboard }) {
           {run.isError&&<p role="alert" className="mt-3 text-xs text-[#ed968d]">{(run.error as Error)?.message||'Run failed. Try again.'}</p>}
           {runOutput&&<div className={`mt-4 rounded border p-3 ${runOutput.status==='success'?'border-[#2d6942] bg-[#112018]':'border-[#68403b] bg-[#211513]'}`} aria-live="polite"><div className="mono mb-2 flex items-center justify-between text-[10px]"><span className={runOutput.status==='success'?'text-[#66e590]':'text-[#efa096]'}>RUN {runOutput.status.toUpperCase()}</span><span className="text-[#7a8980]">{runOutput.executionMs} ms</span></div>{runOutput.stdout&&<pre className="whitespace-pre-wrap text-[11px] text-[#cedbd2]">{runOutput.stdout}</pre>}{runOutput.stderr&&<pre className="mt-2 whitespace-pre-wrap text-[11px] text-[#e8a098]">{runOutput.stderr}</pre>}</div>}
           {submit.isError&&<p role="alert" className="mt-3 text-xs text-[#ed968d]">{(submit.error as Error)?.message||'Submission failed. Your draft is preserved; try again.'}</p>}
-          {submission&&<div className={`mt-4 rounded border p-4 ${submission.passed?'border-[#318551] bg-[#122319]':'border-[#70423b] bg-[#211614]'}`} role="status" aria-live="polite"><div className="flex items-center gap-2 mono text-[11px]">{submission.passed?<CircleCheck size={16} className="text-[#63e78e]"/>:<Activity size={15} className="text-[#ed9d8e]"/>}<span className={submission.passed?'text-[#75ea99]':'text-[#efaa9c]'}>{submission.message || (submission.passed?'All official checks passed.':'Not quite. Review your logic and try again.')}</span></div><div className="mono mt-2 text-[10px] text-[#99a79f]">{submission.passed?`+${submission.scoreAdded} POINTS · ${submission.totalScore} TOTAL · ${submission.solvedCount} SOLVED`:`${submission.attempts} ATTEMPTS · SCORE ${submission.totalScore}`}</div>{submission.passed&&submission.nextQuestionId===null&&<FinalFinish dashboard={dashboard} compact score={submission.totalScore}/>}</div>}
+          {submission&&<div className={`mt-4 rounded border p-4 ${submission.passed?'border-[#318551] bg-[#122319]':'border-[#70423b] bg-[#211614]'}`} role="status" aria-live="polite"><div className="flex items-center gap-2 mono text-[11px]">{submission.passed?<CircleCheck size={16} className="text-[#63e78e]"/>:<Activity size={15} className="text-[#ed9d8e]"/>}<span className={submission.passed?'text-[#75ea99]':'text-[#efaa9c]'}>{submission.message || (submission.passed?'All official checks passed.':'Not quite. Review your logic and try again.')}</span></div><div className="mono mt-2 text-[10px] text-[#99a79f]">{submission.passed?`+${submission.scoreAdded} MARKS · ${submission.totalScore}/15 TOTAL · ${submission.solvedCount} SOLVED`:`${submission.attempts} ATTEMPTS · MARKS ${submission.totalScore}/15`}</div>{submission.passed&&submission.nextQuestionId===null&&<FinalFinish dashboard={dashboard} compact score={submission.totalScore}/>}</div>}
           {expired&&<p className="mt-3 mono text-[10px] text-[#ef968d]">SERVER DEADLINE REACHED. CODE EXECUTION IS CLOSED.</p>}
         </div>
       </section>
@@ -289,7 +373,7 @@ function CompetitionRoom({ dashboard }: { dashboard: ParticipantDashboard }) {
 function FinalFinish({ dashboard, compact=false, score }: { dashboard: ParticipantDashboard; compact?: boolean; score?: number }) {
   return <section className={`panel relative overflow-hidden reveal ${compact?'mt-4 border-[#32864f] p-4':'mx-auto mt-8 max-w-2xl border-[#32864f] p-8 text-center'}`}>
     {!compact&&<div className="confetti" aria-hidden="true">{Array.from({length:20},(_,i)=><span key={i} style={{left:`${(i*47)%100}%`,animationDelay:`${(i%6)*.13}s`,backgroundColor:['#56e486','#48dce1','#ddd077','#a5edb9'][i%4]}}/>)}</div>}
-    {!compact&&<><div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-full border border-[#347b4a] bg-[#152b1c] text-[#63e58d]"><Check size={22}/></div><p className="eyebrow">GAUNTLET COMPLETE</p><h1 className="mt-2 text-3xl font-semibold">{dashboard.teamName} — cleared.</h1><p className="mono mt-3 text-sm text-[#68e890]">FINAL SERVER SCORE: {score ?? dashboard.totalScore}</p></>}
+    {!compact&&<><div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-full border border-[#347b4a] bg-[#152b1c] text-[#63e58d]"><Check size={22}/></div><p className="eyebrow">GAUNTLET COMPLETE</p><h1 className="mt-2 text-3xl font-semibold">{dashboard.teamName} — cleared.</h1><p className="mono mt-3 text-sm text-[#68e890]">FINAL MARKS: {score ?? dashboard.totalScore} / 15</p></>}
     <p className={`mono text-[#d9eee0] ${compact?'text-sm':'mt-7 text-lg'}`} data-testid="text-final-sentence">The sixth sick sheik's sixth sheep's sick.</p>
     <button className="btn btn-primary mt-3" onClick={()=>{if('speechSynthesis' in window){window.speechSynthesis.cancel();const speech=new SpeechSynthesisUtterance("The sixth sick sheik's sixth sheep's sick. The sixth sick sheik's sixth sheep's sick. The sixth sick sheik's sixth sheep's sick.");speech.rate=1.2;window.speechSynthesis.speak(speech);}}} data-testid="button-say-it">SAY IT THREE TIMES FAST!</button>
   </section>;
@@ -329,7 +413,7 @@ function LeaderboardPage() {
   return <div className="app-shell"><Header/><main className="mx-auto max-w-5xl px-4 py-9 md:px-7">
     <div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><p className="eyebrow flex items-center gap-2"><span className="live-dot pulse"/> LIVE SERVER STANDINGS</p><h1 className="mt-2 text-4xl font-semibold tracking-[-.055em]">Leaderboard</h1><p className="mt-2 text-sm text-[#89978f]">{competition.data?.title??'ZERO HOUR DEBUGGER GAUNTLET'}</p></div><div className="mono text-[10px] text-[#77877e]">REFRESHES EVERY 5 SECONDS</div></div>
     {query.isLoading?<Skeleton rows={6}/>:query.isError?<ErrorNotice retry={()=>void query.refetch()}>Standings are temporarily unavailable.</ErrorNotice>:query.data?.length===0?<div className="panel py-16 text-center"><Trophy className="mx-auto text-[#65756b]"/><h2 className="mt-4 text-xl">No teams on the board yet</h2><p className="mt-2 text-sm text-[#8b9991]">Standings will appear as soon as teams begin.</p></div>:
-    <div className="panel overflow-hidden"><div className="scroll-table"><table className="w-full min-w-[640px] text-left"><thead className="bg-[#151c19]"><tr className="mono text-[9px] tracking-[.12em] text-[#75847b]">{['RANK','TEAM','SOLVED','SCORE','STATE','COMPLETED'].map(v=><th key={v} className="px-5 py-4 font-normal">{v}</th>)}</tr></thead><tbody>{query.data?.map((entry,i)=><tr key={entry.teamId} className="border-t border-[#29332f] text-sm transition hover:bg-[#19211d]" data-testid={`row-standing-${entry.teamId}`}><td className="mono px-5 py-4 text-[#9ca9a1]">{String(entry.rank).padStart(2,'0')}{entry.rank===1&&<span className="ml-2 text-[#d5b76f]">LEAD</span>}</td><td className="px-5 py-4 font-medium text-[#d6e2da]">{entry.teamName}<div className="mono mt-1 text-[9px] text-[#718077]">{entry.teamId}</div></td><td className="mono px-5 py-4 text-[#bac9bf]">{entry.solvedCount} / 5</td><td className="mono px-5 py-4 text-[16px] text-[#62e68d]">{entry.score}</td><td className="px-5 py-4"><StatusTag status={entry.status}/></td><td className="mono px-5 py-4 text-[10px] text-[#8a9890]">{entry.completedAt?new Date(entry.completedAt).toLocaleTimeString(): '—'}</td></tr>)}</tbody></table></div></div>}
+    <div className="panel overflow-hidden"><div className="scroll-table"><table className="w-full min-w-[640px] text-left"><thead className="bg-[#151c19]"><tr className="mono text-[9px] tracking-[.12em] text-[#75847b]">{['RANK','TEAM ID','TEAM NAME','SOLVED','TIME TAKEN','SCORE','STATUS'].map(v=><th key={v} className="px-4 py-4 font-normal">{v}</th>)}</tr></thead><tbody>{query.data?.map((entry,i)=><tr key={entry.teamId} className="border-t border-[#29332f] text-sm transition hover:bg-[#19211d]" data-testid={`row-standing-${entry.teamId}`}><td className="mono px-4 py-4 text-[#9ca9a1]">{String(entry.rank).padStart(2,'0')}{entry.rank===1&&<span className="ml-2 text-[#d5b76f]">LEAD</span>}</td><td className="mono px-4 py-4 text-[#65e592]">{entry.teamId}</td><td className="px-4 py-4 font-medium text-[#d6e2da]">{entry.teamName}</td><td className="mono px-4 py-4 text-[#bac9bf]">{entry.solvedCount} / 5</td><td className="mono px-4 py-4 text-[11px] text-[#c2d0c7]">{entry.completedAt ? new Date(entry.completedAt).toLocaleTimeString() : (entry as any).lastSubmissionAt ? new Date((entry as any).lastSubmissionAt).toLocaleTimeString() : '—'}</td><td className="mono px-4 py-4"><span className="text-[17px] font-bold text-[#62e68d]">{entry.score}</span><span className="text-xs text-[#718077]"> / 15</span></td><td className="px-4 py-4"><StatusTag status={entry.status}/></td></tr>)}</tbody></table></div></div>}
   </main></div>;
 }
 
@@ -439,11 +523,7 @@ function OrganizerPasscodeScreen({
             </button>
           </form>
 
-          <div className="mt-6 border-t border-[#2a3430] pt-4 text-center">
-            <p className="mono text-[10px] text-[#6d7e75]">
-              Organizer default passcode: <code className="text-[#56e486]">organizer-2026</code>
-            </p>
-          </div>
+          
         </div>
       </main>
     </div>
@@ -510,7 +590,20 @@ function OrganizerDashboard({ onExit, isDemoAuth = false }: { onExit?: () => voi
     <div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><p className="eyebrow">{isDemoAuth?'EVENT CONTROL / ORGANIZER CONSOLE':'EVENT CONTROL / CLERK AUTHENTICATED'}</p><h1 className="mt-2 text-4xl font-semibold tracking-[-.055em]">Organizer console</h1><p className="mt-2 text-sm text-[#89978f]">Real-time event operations and server-scored team results.</p></div><button className="btn btn-cyan" onClick={doExport} disabled={csvExport.isFetching} data-testid="button-export-csv"><ArrowDownToLine size={15}/>{csvExport.isFetching?'EXPORTING…':'EXPORT RESULTS CSV'}</button></div>
     {summary.isLoading?<Skeleton rows={4}/>:summary.isError?<ErrorNotice retry={()=>void summary.refetch()}>Could not load organizer event summary.</ErrorNotice>:summary.data&&<><section className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">{[['REGISTERED TEAMS',summary.data.teamCount],['STARTED',summary.data.startedCount],['COMPLETED',summary.data.completedCount],['EXPIRED',summary.data.expiredCount],['AVERAGE SCORE',summary.data.averageScore]].map(([k,v])=><div key={String(k)} className="panel px-4 py-4"><p className="mono text-[9px] tracking-[.12em] text-[#77867d]">{k}</p><p className="mono mt-2 text-2xl text-[#d9e7de]">{v}</p></div>)}</section>
     <div className="mb-5 grid gap-4 lg:grid-cols-[.9fr_1.1fr]">
-       <section className="panel p-5"><div className="mb-4 flex items-center justify-between"><h2 className="eyebrow flex items-center gap-2"><Clock3 size={14}/> EVENT SCHEDULE</h2><StatusTag status={summary.data.event.status}/></div><p className={`mono mb-3 text-[9px] ${summary.data.runnerConfigured?'text-[#68e791]':'text-[#ef9b8f]'}`}>{summary.data.runnerConfigured?'ISOLATED RUNNER CONFIGURED':'RUNNER NOT CONFIGURED · SCHEDULING LOCKED'}</p><div className="grid gap-3 sm:grid-cols-[1fr_auto]"><label className="block"><span className="mono mb-2 block text-[9px] text-[#8c9a92]">OFFICIAL START TIME</span><input className="field mono text-xs" type="datetime-local" value={startAt} onChange={e=>setStartAt(e.target.value)} data-testid="input-event-start"/></label><button className="btn btn-primary self-end" onClick={startEvent} disabled={!startAt||setEvent.isPending||!summary.data.runnerConfigured} data-testid="button-set-event">{setEvent.isPending?'SAVING…':'SET START TIME'}</button></div><div className="mono mt-4 grid grid-cols-2 gap-3 text-[10px] text-[#84928a]"><span>START <b className="ml-2 font-normal text-[#bdcbc2]">{summary.data.event.startAt?new Date(summary.data.event.startAt).toLocaleString():'Not scheduled'}</b></span><span>DURATION <b className="ml-2 font-normal text-[#bdcbc2]">{Math.floor(summary.data.event.durationSeconds/60)} min</b></span></div>{setEvent.isError&&<p role="alert" className="mt-3 text-xs text-[#ef978c]">{(setEvent.error as Error)?.message||'Could not set event schedule.'}</p>}</section>
+       <section className="panel p-5"><div className="mb-4 flex items-center justify-between"><h2 className="eyebrow flex items-center gap-2"><Clock3 size={14}/> EVENT SCHEDULE</h2><StatusTag status={summary.data.event.status}/></div><p className={`mono mb-3 text-[9px] ${summary.data.runnerConfigured?'text-[#68e791]':'text-[#ef9b8f]'}`}>{summary.data.runnerConfigured?'ISOLATED RUNNER CONFIGURED':'RUNNER NOT CONFIGURED · SCHEDULING LOCKED'}</p><div className="grid gap-3 sm:grid-cols-[1fr_auto]"><label className="block"><span className="mono mb-2 block text-[9px] text-[#8c9a92]">OFFICIAL START TIME</span><input className="field mono text-xs" type="datetime-local" value={startAt} onChange={e=>setStartAt(e.target.value)} data-testid="input-event-start"/></label><div className="flex gap-2 self-end">
+  <button className="btn btn-primary" onClick={startEvent} disabled={!startAt||setEvent.isPending||!summary.data.runnerConfigured} data-testid="button-set-event">{setEvent.isPending?'SAVING…':'SET START TIME'}</button>
+  <button className="btn btn-cyan" onClick={async ()=>{
+    try {
+      await fetch('/api/organizer/reset-now', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      void client.invalidateQueries({ queryKey: getGetOrganizerSummaryQueryKey() });
+      void client.invalidateQueries({ queryKey: getGetCompetitionQueryKey() });
+      void client.invalidateQueries({ queryKey: getGetOrganizerParticipantsQueryKey() });
+      alert('15-Minute round started now! Timer is reset for all teams.');
+    } catch (e) {
+      alert('Failed to reset round: ' + (e as Error).message);
+    }
+  }} data-testid="button-start-now">START 15-MIN ROUND NOW</button>
+</div></div><div className="mono mt-4 grid grid-cols-2 gap-3 text-[10px] text-[#84928a]"><span>START <b className="ml-2 font-normal text-[#bdcbc2]">{summary.data.event.startAt?new Date(summary.data.event.startAt).toLocaleString():'Not scheduled'}</b></span><span>DURATION <b className="ml-2 font-normal text-[#bdcbc2]">{Math.floor(summary.data.event.durationSeconds/60)} min</b></span></div>{setEvent.isError&&<p role="alert" className="mt-3 text-xs text-[#ef978c]">{(setEvent.error as Error)?.message||'Could not set event schedule.'}</p>}</section>
        <section className="panel p-5"><div className="mb-4 flex items-center justify-between"><h2 className="eyebrow flex items-center gap-2"><FileUp size={14}/> REGISTER TEAMS</h2><span className="mono text-[9px] text-[#74837a]">CSV IMPORT</span></div><textarea className="field mono min-h-[86px] resize-y text-[10px]" placeholder="Team ID,Team Name,Participant Names,Access Code" value={csv} onChange={e=>setCsv(e.target.value)} data-testid="input-team-csv"/><div className="mt-2 mono text-[9px] text-[#78867e]">Access Code is optional; omitted codes are generated and shown once.</div><div className="mt-3 flex flex-wrap items-center justify-between gap-3"><label className="btn cursor-pointer !min-h-[36px]"><FileUp size={13}/> CHOOSE CSV<input className="sr-only" type="file" accept=".csv,text/csv" onChange={onFile} data-testid="input-team-csv-file"/></label><button className="btn btn-primary" disabled={!csv.trim()||importTeams.isPending} onClick={importCsv} data-testid="button-import-csv">{importTeams.isPending?'IMPORTING…':'IMPORT TEAMS'}</button></div>{importTeams.isError&&<p role="alert" className="mt-3 text-xs text-[#ef978c]">{(importTeams.error as Error)?.message||'Import failed.'}</p>}{importResult&&<div className="mt-3 rounded border border-[#315b3e] bg-[#132019] p-3" role="status"><p className="mono text-[10px] text-[#65e58d]">{importResult.imported} TEAMS REGISTERED — ACCESS CODES (SHOWN ONCE)</p><div className="mt-2 max-h-28 overflow-auto">{importResult.teams.map((t, idx)=><div key={`imp-${t.teamId}-${idx}`} className="mono flex justify-between gap-4 py-1 text-[10px] text-[#c2d2c8]"><span>{t.teamName} / {t.teamId}</span><strong className="text-[#83eaa2]">{t.accessCode}</strong></div>)}</div><p className="mt-2 text-[9px] text-[#839189]">Distribute these codes securely to registered teams.</p></div>}</section>
     </div>
     <section className="panel overflow-hidden"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#293530] p-4"><div><h2 className="eyebrow flex items-center gap-2"><Users size={14}/> PARTICIPANT SCOREBOARD</h2><p className="mono mt-1 text-[9px] text-[#78867e]">LIVE DETAIL FROM THE COMPETITION SERVER</p></div><div className="flex flex-wrap gap-2"><input className="field !w-[190px] !py-2 text-xs" placeholder="Search team or ID" value={search} onChange={e=>setSearch(e.target.value)} aria-label="Search teams" data-testid="input-search-participants"/><select className="field !w-auto !py-2 text-xs" value={status} onChange={e=>setStatus(e.target.value as typeof status)} aria-label="Filter by status" data-testid="select-participant-status">{[['all','All statuses'],['in_progress','In progress'],['complete','Complete'],['expired','Expired'],['not_started','Not started']].map(([v,l])=><option key={v} value={v}>{l}</option>)}</select><select className="field !w-auto !py-2 text-xs" value={sort} onChange={e=>setSort(e.target.value as typeof sort)} aria-label="Sort participants" data-testid="select-participant-sort"><option value="score">Sort: score</option><option value="team">Sort: team</option><option value="completion">Sort: completion</option></select></div></div>

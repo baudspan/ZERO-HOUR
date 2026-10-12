@@ -1,3 +1,6 @@
+import fs from "fs";
+
+
 import express, { type Request, type Response } from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
@@ -5,6 +8,30 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import crypto from "crypto";
+import { Pool } from "pg";
+// Native .env file loader
+try {
+  const envPaths = [".env", "../../.env", "../.env"];
+  for (const ep of envPaths) {
+    if (fs.existsSync(ep)) {
+      const raw = fs.readFileSync(ep, "utf8");
+      for (const line of raw.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith("#") && trimmed.includes("=")) {
+          const idx = trimmed.indexOf("=");
+          const k = trimmed.slice(0, idx).trim();
+          const v = trimmed.slice(idx + 1).trim().replace(/^["']|["']$/g, "");
+          if (!process.env[k]) {
+            process.env[k] = v;
+          }
+        }
+      }
+    }
+  }
+} catch (e) {
+  // Ignore
+}
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -224,6 +251,9 @@ interface Team {
   teamName: string;
   participantNames: string[];
   accessCode: string;
+  disqualified?: boolean;
+  disqualifiedAt?: string | null;
+  disqualifiedReason?: string | null;
 }
 
 interface QuestionProgress {
@@ -242,37 +272,144 @@ interface QuestionProgress {
 }
 
 // Event state
-let eventStartAt: Date = new Date(Date.now() - 30 * 1000); // Default to started 30s ago for immediate playability
+// Event state: Initialized to current time on boot so the round is fresh (15 minutes from now)
+let eventStartAt: Date = new Date();
 
-const teamsMap = new Map<string, Team>([
-  [
-    "TEAM-042",
-    {
-      teamId: "TEAM-042",
-      teamName: "CyberKnights",
-      participantNames: ["Alice", "Bob"],
-      accessCode: "zero-hour-2026",
-    },
-  ],
-  [
-    "TEAM-001",
-    {
-      teamId: "TEAM-001",
-      teamName: "ByteBusters",
-      participantNames: ["Charlie", "Dave"],
-      accessCode: "code-run-99",
-    },
-  ],
-  [
-    "TEAM-DEBUG",
-    {
-      teamId: "TEAM-DEBUG",
-      teamName: "Glitch Hunters",
-      participantNames: ["Dev One", "Dev Two"],
-      accessCode: "debug123",
-    },
-  ],
-]);
+const teamsMap = new Map<string, Team>();
+
+// Supabase / PostgreSQL integration
+const STATIC_SUPABASE_URL = "postgresql://postgres.aiqglrfwlxlzzruoxehg:FVkmm54fCX0SUl3F@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres";
+let dbPool: Pool | null = null;
+
+function getDbPool(): Pool | null {
+  if (dbPool) return dbPool;
+  const connStr = (process.env.DATABASE_URL && !process.env.DATABASE_URL.includes("[YOUR-PASSWORD]"))
+    ? process.env.DATABASE_URL
+    : STATIC_SUPABASE_URL;
+
+  try {
+    dbPool = new Pool({
+      connectionString: connStr,
+      ssl: { rejectUnauthorized: false },
+    });
+    console.log("[ZERO HOUR] Connected to Supabase PostgreSQL database pool!");
+    return dbPool;
+  } catch (err) {
+    console.error("[ZERO HOUR] Failed to initialize DB pool:", err);
+    return null;
+  }
+}
+
+
+// Auto-persist leaderboard snapshot to Supabase / DB for organizers
+async function persistLeaderboardSnapshot() {
+  const pool = getDbPool();
+  if (!pool) return;
+  try {
+    // Create leaderboard_archive table if it doesn't already exist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS leaderboard_results (
+        team_id VARCHAR(100) PRIMARY KEY,
+        team_name VARCHAR(255),
+        marks INT DEFAULT 0,
+        questions_solved INT DEFAULT 0,
+        status VARCHAR(50),
+        completion_time TIMESTAMPTZ,
+        last_submission_time TIMESTAMPTZ,
+        is_disqualified BOOLEAN DEFAULT FALSE,
+        disqualified_reason TEXT,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+
+    const now = new Date();
+    const startAt = eventStartAt;
+    for (const [normId, team] of teamsMap) {
+      const prog = progressMap.get(normId) || [];
+      const score = prog.reduce((sum, p) => sum + p.score, 0);
+      const solvedCount = prog.filter((p) => p.status === "solved").length;
+      const q5 = prog.find((p) => p.questionId === 5);
+      const completedAt = q5 && q5.status === "solved" ? q5.solvedAt : null;
+      const status = getTeamStatus(startAt, solvedCount, now, normId);
+      
+      let lastSubmissionAt: string | null = null;
+      for (const p of prog) {
+        if (p.solvedAt) {
+          if (!lastSubmissionAt || new Date(p.solvedAt).getTime() > new Date(lastSubmissionAt).getTime()) {
+            lastSubmissionAt = p.solvedAt;
+          }
+        }
+      }
+
+      await pool.query(`
+        INSERT INTO leaderboard_results (
+          team_id, team_name, marks, questions_solved, status, completion_time, 
+          last_submission_time, is_disqualified, disqualified_reason, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ON CONFLICT (team_id) DO UPDATE SET
+          team_name = EXCLUDED.team_name,
+          marks = EXCLUDED.marks,
+          questions_solved = EXCLUDED.questions_solved,
+          status = EXCLUDED.status,
+          completion_time = EXCLUDED.completion_time,
+          last_submission_time = EXCLUDED.last_submission_time,
+          is_disqualified = EXCLUDED.is_disqualified,
+          disqualified_reason = EXCLUDED.disqualified_reason,
+          updated_at = NOW();
+      `, [
+        normId,
+        team.teamName,
+        score,
+        solvedCount,
+        status,
+        completedAt,
+        lastSubmissionAt,
+        Boolean(team.disqualified),
+        team.disqualifiedReason || null
+      ]);
+    }
+  } catch (err: any) {
+    // Non-blocking background log
+    // console.warn("[ZERO HOUR] Leaderboard auto-save notice:", err.message);
+  }
+}
+
+async function syncTeamsFromSupabase() {
+  const pool = getDbPool();
+  if (!pool) return;
+  try {
+    // Try querying teams table
+    const res = await pool.query("SELECT * FROM teams");
+    let count = 0;
+    for (const row of res.rows) {
+      // Support common column names, including "Team ID", "Team Name", team_id, teamId, etc.
+      const rawId = row["Team ID"] || row["team_id"] || row.teamid || row.teamId || row.id;
+      const rawName = row["Team Name"] || row["team_name"] || row.teamname || row.teamName || row.name || rawId;
+      const rawParticipants = row["participant_names"] || row.participants || row.participantNames || [];
+      const rawCode = row["access_code"] || row.accesscode || row.accessCode || "zero-hour-2026";
+      
+      if (!rawId) continue;
+      const tId = String(rawId).trim().toUpperCase();
+      const pNames = Array.isArray(rawParticipants)
+        ? rawParticipants
+        : typeof rawParticipants === "string"
+        ? rawParticipants.split(";").map((p) => p.trim()).filter(Boolean)
+        : [];
+      
+      teamsMap.set(tId, {
+        teamId: tId,
+        teamName: String(rawName).trim(),
+        participantNames: pNames,
+        accessCode: String(rawCode).trim() || "zero-hour-2026",
+      });
+      initTeamProgress(tId);
+      count++;
+    }
+    console.log(`[ZERO HOUR] Loaded ${count} official teams from Supabase database.`);
+  } catch (err: any) {
+    console.error("[ZERO HOUR] Notice: Could not sync teams from Supabase table:", err.message);
+  }
+}
 
 const progressMap = new Map<string, QuestionProgress[]>();
 
@@ -350,7 +487,11 @@ function getEventStatus(startAt: Date, now: Date): "not_scheduled" | "scheduled"
   return "running";
 }
 
-function getTeamStatus(startAt: Date, solvedCount: number, now: Date) {
+function getTeamStatus(startAt: Date, solvedCount: number, now: Date, teamId?: string) {
+  if (teamId) {
+    const t = teamsMap.get(teamId.toUpperCase());
+    if (t?.disqualified) return "disqualified";
+  }
   if (solvedCount === 5) return "complete";
   const deadline = new Date(startAt.getTime() + EVENT_DURATION_SECONDS * 1000);
   if (now >= deadline) return "expired";
@@ -539,12 +680,13 @@ function buildParticipantDashboard(teamId: string) {
   const startAt = eventStartAt;
   const deadline = new Date(startAt.getTime() + EVENT_DURATION_SECONDS * 1000);
   const evStatus = getEventStatus(startAt, now);
-  const status = solvedCount === 5 ? "complete" : evStatus;
+  const status = team?.disqualified ? "disqualified" : (solvedCount === 5 ? "complete" : evStatus);
 
   let activeQuestion: any = null;
   let draft: string | null = null;
 
-  if (active) {
+  const isExpiredOrDisqualified = Boolean(team?.disqualified) || status === "ended" || status === "expired";
+  if (active && !isExpiredOrDisqualified) {
     const ch = CHALLENGES.find((c) => c.id === active.questionId);
     if (ch) {
       const { tests, ...rest } = ch;
@@ -563,6 +705,8 @@ function buildParticipantDashboard(teamId: string) {
     startAt: startAt.toISOString(),
     deadline: deadline.toISOString(),
     status,
+    disqualified: Boolean(team?.disqualified),
+    disqualifiedReason: team?.disqualifiedReason || null,
     activeQuestionId: active ? active.questionId : null,
     question: activeQuestion,
     draft,
@@ -615,7 +759,15 @@ async function createApp() {
   });
 
   // Leaderboard
-  api.get("/leaderboard", (_req: Request, res: Response) => {
+  api.get("/sync-supabase", async (_req: Request, res: Response) => {
+    await syncTeamsFromSupabase();
+    res.json({ success: true, count: teamsMap.size });
+  });
+
+  api.get("/leaderboard", async (_req: Request, res: Response) => {
+    if (teamsMap.size === 0) {
+      await syncTeamsFromSupabase();
+    }
     const now = new Date();
     const startAt = eventStartAt;
     const list: Array<{
@@ -624,7 +776,9 @@ async function createApp() {
       score: number;
       solvedCount: number;
       completedAt: string | null;
+      lastSubmissionAt: string | null;
       status: string;
+      isDisqualified: boolean;
     }> = [];
 
     for (const [normId, team] of teamsMap) {
@@ -633,7 +787,17 @@ async function createApp() {
       const solvedCount = prog.filter((p) => p.status === "solved").length;
       const q5 = prog.find((p) => p.questionId === 5);
       const completedAt = q5 && q5.status === "solved" ? q5.solvedAt : null;
-      const status = getTeamStatus(startAt, solvedCount, now);
+      const status = getTeamStatus(startAt, solvedCount, now, normId);
+      
+      // Calculate latest solved time across all solved challenges for tie-breaking by fastest submission time
+      let lastSubmissionAt: string | null = null;
+      for (const p of prog) {
+        if (p.solvedAt) {
+          if (!lastSubmissionAt || new Date(p.solvedAt).getTime() > new Date(lastSubmissionAt).getTime()) {
+            lastSubmissionAt = p.solvedAt;
+          }
+        }
+      }
 
       list.push({
         teamId: normId,
@@ -641,18 +805,32 @@ async function createApp() {
         score,
         solvedCount,
         completedAt,
+        lastSubmissionAt,
         status,
+        isDisqualified: Boolean(team.disqualified),
       });
     }
 
     list.sort((a, b) => {
+      // Disqualified teams are always placed at the bottom
+      if (a.isDisqualified !== b.isDisqualified) {
+        return a.isDisqualified ? 1 : -1;
+      }
+      // Primary: Score out of 15 (descending)
       if (b.score !== a.score) return b.score - a.score;
+      // Secondary: Solved challenges count (descending)
       if (b.solvedCount !== a.solvedCount) return b.solvedCount - a.solvedCount;
+      // Tertiary: Timing! (Faster submission time wins earlier rank)
       if (a.completedAt && b.completedAt) {
         return new Date(a.completedAt).getTime() - new Date(b.completedAt).getTime();
       }
       if (a.completedAt) return -1;
       if (b.completedAt) return 1;
+      if (a.lastSubmissionAt && b.lastSubmissionAt) {
+        return new Date(a.lastSubmissionAt).getTime() - new Date(b.lastSubmissionAt).getTime();
+      }
+      if (a.lastSubmissionAt) return -1;
+      if (b.lastSubmissionAt) return 1;
       return a.teamId.localeCompare(b.teamId);
     });
 
@@ -671,7 +849,8 @@ async function createApp() {
   api.post("/organizer/auth", (req: Request, res: Response) => {
     const { passcode } = req.body || {};
     const entered = String(passcode || "").trim();
-    if (entered === ORGANIZER_KEY || entered === "admin2026" || entered === "organizer-2026") {
+    const isOrgMatch = !ORGANIZER_KEY || entered === ORGANIZER_KEY;
+    if (isOrgMatch) {
       res.cookie("zh_organizer_key", ORGANIZER_KEY, {
         httpOnly: false,
         sameSite: "none",
@@ -698,7 +877,7 @@ async function createApp() {
       bearer === ORGANIZER_KEY ||
       bearer === "organizer-session-token" ||
       orgKeyHeader === "organizer-session-token" ||
-      orgKeyHeader === "admin2026";
+      (!ORGANIZER_KEY && true);
 
     if (!isAuthorized) {
       res.status(403).json({
@@ -710,25 +889,65 @@ async function createApp() {
   };
 
   // Participant Session Login
-  api.post("/participant/session", (req: Request, res: Response) => {
+  api.post("/participant/session", async (req: Request, res: Response) => {
     const { teamId, accessCode } = req.body || {};
     const rawTeamId = String(teamId || "").trim();
+    if (!rawTeamId) {
+      res.status(400).json({ error: "Please enter your assigned Team ID." });
+      return;
+    }
 
-    // Default or normalize teamId
-    const normId = (rawTeamId || "TEAM-042").toUpperCase();
+    const normId = rawTeamId.toUpperCase();
     const enteredCode = String(accessCode || "").trim();
-
-    // Access token/code is the same for all (accept universal code or any non-empty code)
     const effectiveCode = enteredCode || UNIVERSAL_ACCESS_CODE;
 
+    // Check if team is in memory; if not and Supabase is connected, attempt live lookup
     let team = teamsMap.get(normId);
+    if (!team && dbPool) {
+      try {
+        const queryRes = await pool.query(
+          "SELECT * FROM teams WHERE UPPER(team_id) = $1 OR UPPER(teamid) = $1 LIMIT 1",
+          [normId]
+        );
+        if (queryRes.rows.length > 0) {
+          const row = queryRes.rows[0];
+          const rawName = row.team_name || row.teamname || row.teamName || row.name || normId;
+          const rawParticipants = row.participant_names || row.participants || row.participantNames || [];
+          const rawCode = row.access_code || row.accesscode || row.accessCode || UNIVERSAL_ACCESS_CODE;
+          const pNames = Array.isArray(rawParticipants)
+            ? rawParticipants
+            : typeof rawParticipants === "string"
+            ? rawParticipants.split(";").map((p) => p.trim()).filter(Boolean)
+            : [];
+          team = {
+            teamId: normId,
+            teamName: String(rawName).trim(),
+            participantNames: pNames,
+            accessCode: String(rawCode).trim() || UNIVERSAL_ACCESS_CODE,
+          };
+          teamsMap.set(normId, team);
+          initTeamProgress(normId);
+        }
+      } catch (err: any) {
+        console.warn("[ZERO HOUR] Supabase lookup error:", err.message);
+      }
+    }
 
-    // Auto-register team if it does not exist yet (organizer can import official team IDs later)
+    // STRICT TEAM ID VALIDATION:
+    // If teams have been loaded into the database or roster, prevent invalid team IDs!
+    if (!team && teamsMap.size > 0) {
+      res.status(401).json({
+        error: `Invalid Team ID "${rawTeamId}". This team ID is not registered in the gauntlet roster.`
+      });
+      return;
+    }
+
+    // If no teams loaded anywhere yet, permit registration
     if (!team) {
       team = {
         teamId: normId,
-        teamName: rawTeamId || normId,
-        participantNames: [rawTeamId || normId],
+        teamName: rawTeamId,
+        participantNames: [rawTeamId],
         accessCode: effectiveCode,
       };
       teamsMap.set(normId, team);
@@ -832,6 +1051,35 @@ async function createApp() {
     next();
   };
 
+  // Participant Screen Switch / Tab Leave Disqualification endpoint
+  api.post("/participant/disqualify", requireParticipant, (req: Request, res: Response) => {
+    const teamId = (req as any).teamId;
+    const { reason } = req.body || {};
+    const normId = String(teamId || "").toUpperCase();
+    const team = teamsMap.get(normId);
+    if (team) {
+      team.disqualified = true;
+      team.disqualifiedAt = new Date().toISOString();
+      team.disqualifiedReason = reason || "Tab switch or screen departure detected";
+      console.log(`[ZERO HOUR] Team ${normId} DISQUALIFIED. Reason: ${team.disqualifiedReason}`);
+      void persistLeaderboardSnapshot();
+    }
+    // Lock any active question draft in progress
+    const prog = progressMap.get(normId);
+    if (prog) {
+      for (const q of prog) {
+        if (q.status === "unlocked") {
+          q.status = "locked";
+        }
+      }
+    }
+    res.json({
+      disqualified: true,
+      teamId: normId,
+      message: "Time is up. Disqualified due to tab switch or screen departure.",
+    });
+  });
+
   // Participant Dashboard
   api.get("/participant/me", requireParticipant, (req: Request, res: Response) => {
     const teamId = (req as any).teamId;
@@ -867,6 +1115,11 @@ async function createApp() {
       const questionId = Number(req.params.questionId);
       const { code, input } = req.body || {};
 
+      const team = teamsMap.get(teamId);
+      if (team?.disqualified) {
+        res.status(403).json({ error: "Time is up. Disqualified due to screen or tab departure." });
+        return;
+      }
       const prog = progressMap.get(teamId);
       const q = prog?.find((p) => p.questionId === questionId);
       if (!q || q.status !== "unlocked") {
@@ -876,8 +1129,15 @@ async function createApp() {
 
       q.draft = String(code || "");
 
-      // Execute code with custom input
-      const result = await runPythonScript(String(code || ""), input);
+      // If no custom input provided, automatically use the first test case input of this challenge
+      let effectiveInput = input;
+      if (effectiveInput === undefined || effectiveInput === null || (typeof effectiveInput === "string" && !effectiveInput.trim())) {
+        const challenge = CHALLENGES.find((c) => c.id === questionId);
+        if (challenge && challenge.tests.length > 0) {
+          effectiveInput = challenge.tests[0][0];
+        }
+      }
+      const result = await runPythonScript(String(code || ""), effectiveInput);
       res.json(result);
     },
   );
@@ -928,10 +1188,8 @@ async function createApp() {
 
       let scoreAdded = 0;
       if (allPassed) {
-        const unlockedAt = q.unlockedAt ? new Date(q.unlockedAt) : startAt;
-        const elapsedSec = Math.max(0, (now.getTime() - unlockedAt.getTime()) / 1000);
-        const penalty = Math.floor(Math.max(0, elapsedSec - 60) / 15);
-        scoreAdded = Math.max(0, 20 - penalty);
+        // 15 Marks Total (3 Marks per question)
+        scoreAdded = 3;
 
         q.status = "solved";
         q.score = scoreAdded;
@@ -1035,7 +1293,7 @@ async function createApp() {
       const attempts = prog.reduce((sum, p) => sum + p.attempts, 0);
       const q5 = prog.find((p) => p.questionId === 5);
       const completedAt = q5 && q5.status === "solved" ? q5.solvedAt : null;
-      const status = getTeamStatus(startAt, solvedCount, now);
+      const status = getTeamStatus(startAt, solvedCount, now, normId);
 
       const searchable = `${normId} ${team.teamName} ${team.participantNames.join(" ")}`.toLowerCase();
       if (search && !searchable.includes(search)) continue;
@@ -1137,6 +1395,11 @@ async function createApp() {
     res.json({ imported: created.length, teams: created });
   });
 
+  api.post("/organizer/save-leaderboard", requireOrganizer, async (_req: Request, res: Response) => {
+    await persistLeaderboardSnapshot();
+    res.json({ success: true, message: "Leaderboard results snapshot saved successfully to database." });
+  });
+
   api.get("/organizer/export", requireOrganizer, (_req: Request, res: Response) => {
     const now = new Date();
     const startAt = eventStartAt;
@@ -1166,7 +1429,7 @@ async function createApp() {
       const prog = progressMap.get(normId) || [];
       const score = prog.reduce((sum, p) => sum + p.score, 0);
       const solved = prog.filter((p) => p.status === "solved").length;
-      const status = getTeamStatus(startAt, solved, now);
+      const status = getTeamStatus(startAt, solved, now, normId);
       const q5 = prog.find((p) => p.questionId === 5);
       const completed = q5 && q5.status === "solved" ? q5.solvedAt : "";
 
@@ -1249,6 +1512,7 @@ async function createApp() {
     });
   }
 
+  await syncTeamsFromSupabase();
   app.listen(PORT, HOST, () => {
     console.log(`[ZERO HOUR] Server listening at http://${HOST}:${PORT}`);
   });
